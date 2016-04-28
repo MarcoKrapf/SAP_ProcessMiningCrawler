@@ -1,0 +1,427 @@
+*&---------------------------------------------------------------------*
+*& Report  ZZ_DEVB_41_TABELLENFINDER
+*&
+*&---------------------------------------------------------------------*
+*& SAP ABAP-Crawler zur Identifizierung potentiell geeigneter Tabellen für Process Mining
+*&
+*& Entwickelt im Rahmen des Seminars EBA bei Prof. Sigurd Schacht an der Hochschule Heilbronn
+*& Version 1.1 vom 01. Januar 2014
+*& Autor: Marco Krapf
+*&
+*& Beschreibung des Crawlers siehe zugehörige Seminararbeit
+*&
+*& Infos zu dieser Version:
+*& - Die "Suchtiefe" ist statisch auf 3 Ebenen ab der Starttabelle festgelegt
+*& - Gefundene Includes werden nur angezeigt, aber nicht extra durchsucht (siehe Kommentar im Code)
+*& - Auskommentierte WRITE-Befehle können zur Überwachung des Crawlers aktiviert werden
+*&---------------------------------------------------------------------*
+
+REPORT  ZZ_DEVB_41_TABELLENFINDER.
+
+* Counter
+DATA counterDurchsucht TYPE i."Counter für die Anzahl der durchsuchten Tabellen
+DATA counterFieldname TYPE i.
+DATA counterDomname TYPE i.
+DATA counterDatatype TYPE i.
+DATA counterChecktable TYPE i.
+DATA counterPrecfield TYPE i.
+DATA counterInhalte TYPE i.
+DATA counterAppendChecktable TYPE i.
+DATA counterAppendPrecfield TYPE i.
+DATA counterFoundChecktable TYPE i.
+DATA counterFoundPrecfield TYPE i.
+DATA counterFinishedChecktable TYPE i.
+DATA counterFinishedPrecfield TYPE i.
+
+* Regelung der Suchtiefe auf 3 Ebenen (das ist verbesserungswürdig!!)
+DATA ebeneSuchtiefe TYPE i. "Variable die bestimmt, ob noch eine Ebene durchsucht wird (Wert 0) oder nicht (Wert 1)
+DATA letzteTabelle TYPE string. "Diese Variable markiert die letzte gefundene Fremdschlüsseltabelle des ersten Durchlaufs
+
+*--------- Definitionen
+DATA message1(100) TYPE c. "Message, wenn die gesuchte Tabelle nicht existiert
+
+* Tabelle DD02L: Hier sind alle SAP-Tabellen drin, die es gibt (rund 430000 Stück). Evtl. TABCLASS berücksichtigen.
+DATA it_dd02l TYPE TABLE OF DD02L. "Interne Tabelle erstellen
+DATA wa_dd02l LIKE LINE OF it_dd02l. "Arbeitsbereich erstellen
+
+* Tabelle DD02T
+DATA it_dd02t TYPE TABLE OF DD02T. "Interne Tabelle erstellen
+DATA wa_dd02t LIKE LINE OF it_dd02t. "Arbeitsbereich erstellen
+
+* Tabelle DD03L
+DATA it_dd03l TYPE TABLE OF DD03L. "Interne Tabelle erstellen
+DATA wa_dd03l LIKE LINE OF it_dd03l. "Arbeitsbereich erstellen
+
+* Dynamisch, jeweils die gefundene Tabelle
+DATA it_regex TYPE TABLE OF MATCH_RESULT. "Interne Tabelle erstellen für die Fundstellen des REGEX
+DATA wa_regex LIKE LINE OF it_regex. "Arbeitsbereich erstellen für die Fundstellen des REGEX
+DATA describeTyp TYPE c. "Variable für die DatenTypBestimmung, da FIND nur mit zeichenartigen Datentypen geht
+
+* Strukturen für Speicherung und Verarbeitung von Checktables
+DATA it_checktable TYPE STANDARD TABLE OF string. "Interne Tabelle erstellen
+DATA wa_checktable LIKE LINE OF it_checktable. "Arbeitsbereich erstellen
+
+* Strukturen für Speicherung und Verarbeitung von Precfields
+DATA it_precfield TYPE STANDARD TABLE OF string. "Interne Tabelle erstellen
+DATA wa_precfield LIKE LINE OF it_precfield. "Arbeitsbereich erstellen
+
+* Strukturen für Speicherung und Verarbeitung von Fremdschlüssel- und inkludierten Tabellen
+DATA it_found TYPE STANDARD TABLE OF string. "Interne "Sammel"Tabelle erstellen für Tabelle, die noch durchsucht werden müssen
+DATA wa_found LIKE LINE OF it_found. "Arbeitsbereich erstellen
+
+* Tabelle, in die alle schon durchsuchten Tabellen geschrieben werden
+DATA it_finished TYPE STANDARD TABLE OF string.
+DATA wa_finished LIKE LINE OF it_finished.
+wa_finished = 'HAPPY NEW YEAR'. "Initialer Eintrag
+APPEND wa_finished TO it_finished.
+
+* Tabelle, in der alle für Process Mining geeigneten Tabellen gesammelt werden für die Zusammenfassung
+DATA it_positive TYPE STANDARD TABLE OF string.
+DATA wa_positive LIKE LINE OF it_positive. "Arbeitsbereich für die Ausgabe der Tabelleninhalte in der Zusammenfassung
+
+* Aktuelle Tabelle
+DATA wa_aktuell TYPE string.
+
+*--------- Variablen für die dynamischen Tabellen anlegen
+DATA ref_struct TYPE REF TO data.
+FIELD-SYMBOLS: <fs_struct> TYPE any, <fs_component> TYPE any.
+*--------------------------------------------------------
+
+*--------- Name der Tabelle eingeben, nach der zuerst gesucht werden soll
+PARAMETERS suchtab TYPE string OBLIGATORY. "Eingabefeld für die gesuchte Tabelle
+APPEND suchtab TO it_found. "An "Sammel"Tabelle anhängen
+ebeneSuchtiefe = 1. "Zähler auf erste Ebene stellen
+
+FORMAT COLOR = 7.
+WRITE: / 'START DER SUCHE MIT TABELLE', suchtab.
+WRITE: / .
+FORMAT COLOR = OFF.
+
+LOOP AT it_found INTO wa_aktuell.
+
+***************************************************************************************************
+*-------------------- Hier startet die Durchsuchung einer Tabelle ---------------------------------
+*--------- Gesuchte Datenbanktabelle auslesen
+SELECT * FROM DD02L INTO TABLE it_dd02l WHERE tabname = wa_aktuell. "Alle Informationen über die gefundene Tabelle in die interne Tabelle schreiben
+
+*--------- Gefundene Tabelle untersuchen und interessante Fundstellen ausgeben
+IF sy-subrc = 0. "Wenn die Tabelle existiert
+  FORMAT COLOR = 1.
+  WRITE: / 'TABELLE', wa_aktuell, 'WIRD UNTERSUCHT.'.
+  FORMAT COLOR = OFF.
+  WRITE: / 'Aktuelle Suchebene ausgehend von der Starttabelle:', ebeneSuchtiefe.
+  PERFORM tabellenartAuslesen.           "Unterprogramm aufrufen -> DD02L
+  PERFORM tabellenbeschreibungAuslesen.  "Unterprogramm aufrufen -> DD02T
+  PERFORM spalteninfosAuslesen.          "Unterprogramm aufrufen -> DD03L
+  PERFORM gefundeneTabelleAuslesen.      "Unterprogramm aufrufen -> Dynamisch, jeweils die gefundene Tabelle
+  counterDurchsucht = counterDurchsucht + 1. "Hochzählen der durchsuchten Tabellen
+  DELETE TABLE it_found FROM wa_aktuell. "Tabelle die gerade durchsucht wurde aus der "Sammel"Tabelle löschen
+  APPEND wa_aktuell TO it_finished. "Tabelle die gerade durchsucht wurde eintragen in Tabelle der schon durchsuchten Tabellen eintragen
+*--------- Fazit der Tabelle ausgeben
+  WRITE: /.
+  IF counterFieldname = 0 AND counterDomname = 0 AND counterDatatype = 0 AND counterInhalte = 0.
+    FORMAT COLOR = 6.
+    WRITE: / 'FAZIT: Tabelle', wa_aktuell, 'scheint nicht geeignet für Process Mining.'.
+    FORMAT COLOR = OFF.
+  ELSE.
+    FORMAT COLOR = 5.
+    WRITE: / 'FAZIT: Tabelle', wa_aktuell, 'ist potentiell geeignet für Process Mining.'.
+    FORMAT COLOR = OFF.
+    APPEND wa_aktuell TO it_positive. "Tabellennamen an die Tabelle mit allen geeigneten Tabellen anfügen
+  ENDIF.
+
+ELSE. "Wenn die Tabelle nicht existiert
+  CONCATENATE wa_aktuell ' ist keine SAP-Datenbanktabelle.' INTO message1.
+  MESSAGE message1 TYPE 'I'.
+ENDIF.
+
+*--------- Informationen nach dem Durchsuchen...
+WRITE: /.
+WRITE: / '******   Bisher wurden', counterDurchsucht, 'Tabellen durchsucht.', /.
+*WRITE: / 'Letzte Tabelle der zweiten Ebene:', letzteTabelle, '(auskommentiert, nur zur Überwachung)'.
+IF it_found IS INITIAL. "Beenden wenn alle Tabellen abgearbeitet sind
+  WRITE: / .
+  WRITE: / '******   Die Suche wurde nach', ebeneSuchtiefe, 'Suchebenen abgeschlossen.', / .
+  WRITE: / .
+  WRITE: / '-----------------------------------------------------------------------------------------'.
+  WRITE: / .
+  FORMAT COLOR = 7.
+  WRITE: / 'ZUSAMMENFASSUNG', / .
+  FORMAT COLOR = OFF.
+  WRITE: / 'Insgesamt wurden', counterDurchsucht, 'Tabellen durchsucht.', / .
+  WRITE: / 'Folgende Tabellen wurden ausgehend von Tabelle', suchtab, 'als potentiell geeignet für Process Mining identifiziert:'.
+  LOOP AT it_positive INTO wa_positive. "Alle gefundenen Treffer durchlaufen
+    SELECT * FROM DD02T INTO TABLE it_dd02t WHERE tabname = wa_positive AND ddlanguage = 'D'. "Tabellenbeschreibung auslesen
+      LOOP AT it_dd02t INTO wa_dd02t.
+      ENDLOOP.
+    WRITE: /5 wa_positive, 15 wa_dd02t-ddtext. "Tabellenname und Tabellenbeschreibung ausgeben
+  ENDLOOP.
+  WRITE: / .
+  WRITE: / '(c) Marco Krapf, Hochschule Heilbronn'.
+  EXIT. "SuchSchleife verlassen und Anzeige stehen lassen, Programm ist quasi fertig
+ENDIF.
+*WRITE: / .
+*WRITE: / 'Diese Tabellen stehen noch aus... (auskommentiert, nur zur Überwachung)'. "Anzeige der Tabellen, die noch durchsucht werden
+*LOOP AT it_found INTO wa_found.
+*  WRITE: /5 wa_found.
+*ENDLOOP.
+WRITE: / .
+WRITE: / '-----------------------------------------------------------------------------------------'.
+WRITE: / .
+IF wa_aktuell = letzteTabelle.
+  ebeneSuchtiefe = 3. "Zähler auf dritte Ebene stellen
+ENDIF.
+*-------------------- Hier endet die Durchsuchung einer Tabelle -----------------------------------
+***************************************************************************************************
+
+ENDLOOP.
+
+*&---------------------------------------------------------------------*
+*&      Form  tabellenartAuslesen
+*&---------------------------------------------------------------------*
+*       DD02L
+*----------------------------------------------------------------------*
+FORM tabellenartAuslesen.
+
+  LOOP AT it_dd02l INTO wa_dd02l. "Tabelle durchlaufen und in Arbeitsbereich schreiben
+    WRITE: /, / '----- GEFUNDEN IN TABELLE DD02L (SAP-Tabellen)', /.
+    WRITE: / 'Tabellenname: ', wa_dd02l-tabname, / 'Tabellenart : ', wa_dd02l-tabclass, /.
+  ENDLOOP.
+
+ENDFORM.                    "tabellenartAuslesen
+
+
+*&---------------------------------------------------------------------*
+*&      Form  tabellenbeschreibungAuslesen
+*&---------------------------------------------------------------------*
+*       DD02T
+*----------------------------------------------------------------------*
+FORM tabellenbeschreibungAuslesen.
+
+  SELECT * FROM DD02T INTO TABLE it_dd02t WHERE tabname = wa_aktuell AND ddlanguage = 'D'.
+
+  LOOP AT it_dd02t INTO wa_dd02t.
+  ENDLOOP.
+
+  WRITE: / '----- GEFUNDEN IN TABELLE DD02T (R/3-DD: Texte zu SAP-Tabellen)', /.
+  WRITE: / 'Tabellenbeschreibung: ', wa_dd02t-ddtext, /.
+
+ENDFORM.                    "tabellenbeschreibungAuslesen
+
+
+*&---------------------------------------------------------------------*
+*&      Form  spalteninfosAuslesen
+*&---------------------------------------------------------------------*
+*       DD03L
+*----------------------------------------------------------------------*
+FORM spalteninfosAuslesen.
+
+  "Counter zurücksetzen
+  counterFieldname = 0.
+  counterDomname = 0.
+  counterDatatype = 0.
+  counterChecktable = 0.
+  counterPrecfield = 0.
+  counterFinishedChecktable = 0.
+  counterFinishedPrecfield = 0.
+  counterFoundChecktable = 0.
+  counterFoundPrecfield = 0.
+  counterAppendChecktable = 0.
+  counterAppendPrecfield = 0.
+
+  "Interne Tabellen des Unterprogramms zurücksetzen
+  CLEAR it_checktable.
+  CLEAR it_precfield.
+
+  SELECT * FROM DD03L INTO TABLE it_dd03l WHERE tabname = wa_aktuell.
+
+  WRITE: / '----- GEFUNDEN IN TABELLE DD03L (Tabellenfelder)', /.
+
+  "1) Check auf Feldname
+  WRITE: / 'Folgende Feldnamen der Tabelle', wa_aktuell, 'könnten geeignet sein:'.
+  LOOP AT it_dd03l INTO wa_dd03l.
+    "Check auf brauchbare Feldnamen
+    IF wa_dd03l-fieldname = 'UZEIT'
+      OR wa_dd03l-fieldname = 'LOGTIME'
+      OR wa_dd03l-fieldname = 'LTIME'
+      OR wa_dd03l-fieldname = 'LAETM'
+      OR wa_dd03l-fieldname = 'ERSTM'
+      OR wa_dd03l-fieldname CP '*TIM*' "...contains pattern
+      OR wa_dd03l-fieldname CP '*ZEIT*'.
+    WRITE: /5 wa_dd03l-fieldname.
+    counterFieldname = counterFieldname + 1.
+    ENDIF.
+  ENDLOOP.
+  IF counterFieldname = 0.
+    WRITE: /5 '(keine)'.
+  ENDIF.
+  WRITE: /.
+
+  "2) Check auf Domäne
+  WRITE: / 'Folgende Domänenbezeichnungen der Tabelle', wa_aktuell, 'könnten geeignet sein:'.
+  LOOP AT it_dd03l INTO wa_dd03l.
+    "Check auf brauchbare Datenelemente
+    IF wa_dd03l-domname = 'UZEIT'
+      OR wa_dd03l-domname = 'SYTIME'
+      OR wa_dd03l-domname = 'LTIME'
+      OR wa_dd03l-fieldname CP '*TIM*' "...contains pattern
+      OR wa_dd03l-fieldname CP '*ZEIT*'.
+      WRITE /5 wa_dd03l-domname.
+      counterDomname = counterDomname + 1.
+    ENDIF.
+  ENDLOOP.
+  IF counterDomname = 0.
+    WRITE: /5 '(keine)'.
+  ENDIF.
+  WRITE: /.
+
+  "Check auf Datentyp
+  WRITE: / 'Folgende Datentypen des ABAP Dictionaries der Tabelle', wa_aktuell, 'könnten geeignet sein:'.
+  LOOP AT it_dd03l INTO wa_dd03l.
+    "Check auf brauchbare Datentypen
+    IF wa_dd03l-datatype = 'TIMS'.
+      WRITE: /5 wa_dd03l-datatype.
+      counterDatatype = counterDatatype + 1.
+    ENDIF.
+  ENDLOOP.
+  IF counterDatatype = 0.
+    WRITE: /5 '(keine)'.
+  ENDIF.
+  WRITE: /.
+
+  "3) Check auf Fremdschlüsselbeziehungen
+  WRITE: / 'Die Tabelle', wa_aktuell, 'hat folgende Fremdschlüsselbeziehungen:'.
+  LOOP AT it_dd03l INTO wa_dd03l.
+    "Tabelle T000 (Mandanten) und Wildcard * ausschließen
+    IF wa_dd03l-checktable <> '' AND wa_dd03l-checktable <> '*' AND wa_dd03l-checktable <> 'T000'.
+      "Gefundene Tabelle darf nur an die Tabelle it_checktable angefügt werden, wenn sie nicht schon drin ist (Keine Duplikate!)
+      IF it_checktable IS INITIAL. "Beim ersten mal auf jeden Fall anfügen, wenn die Tabelle noch leer ist
+        APPEND wa_dd03l-checktable TO it_checktable.
+      ENDIF.
+      LOOP AT it_checktable INTO wa_checktable. "Prüfen, ob der Eintrag schon drin ist
+        IF wa_checktable = wa_dd03l-checktable.
+          counterAppendChecktable = counterAppendChecktable + 1.
+        ENDIF.
+      ENDLOOP.
+      IF counterAppendChecktable = 0.
+        APPEND wa_dd03l-checktable TO it_checktable. "An Tabelle anfügen
+      ENDIF.
+      counterAppendChecktable = 0. "Zähler zurücksetzen für nächsten Durchlauf
+      counterChecktable = counterChecktable + 1. "Zähler zeigt an, dass eine Tabelle gefunden wurde (nur für die optische Ausgabe)
+    ENDIF.
+  ENDLOOP. "Tabelle it_checktable ist gefüllt mit allen Funden ohne Duplikate
+  LOOP AT it_checktable INTO wa_checktable.
+    WRITE: /5 wa_checktable.
+    "Gefundene Tabelle darf nur an die Sammeltabelle it_found angefügt werden, wenn sie nicht schon drin ist und auch noch nicht durchsucht wurde
+    LOOP AT it_finished INTO wa_finished.
+      IF wa_finished = wa_checktable.
+        counterFinishedChecktable = counterFinishedChecktable + 1.
+      ENDIF.
+    ENDLOOP.
+    IF counterFinishedChecktable = 0.
+      LOOP AT it_found INTO wa_found.
+        IF wa_found = wa_checktable.
+          counterFoundChecktable = counterFoundChecktable + 1.
+        ENDIF.
+      ENDLOOP.
+      IF counterFoundChecktable = 0 AND ebeneSuchtiefe < 3. "In dieser Version wird mit der AND-Bedingung die Suchtiefe auf 3 Ebenen begrenzt !!!!!!!!!!!!!!!!!
+        APPEND wa_checktable TO it_found. "Tabellennamen zu Sammeltabelle zufügen
+      ENDIF.
+    ENDIF.
+    counterFoundChecktable = 0. "Zähler zurücksetzen für nächsten Durchlauf
+    counterFinishedChecktable = 0. "Zähler zurücksetzen für nächsten Durchlauf
+  ENDLOOP.
+  "Hier wird das Ende des ersten Suchlaufs nach Fremdschlüsseltabellen markiert
+  IF ebeneSuchtiefe = 1.
+    letzteTabelle = wa_checktable. "Zuweisen der letzten gefundenen Fremdschlüsseltabelle
+    ebeneSuchtiefe = 2. "Blockieren, damit hier nicht mehr reingesprungen wird und Ebene aud zwei stellen
+  ENDIF.
+  IF counterChecktable = 0.
+    WRITE: /5 '(keine)'.
+  ENDIF.
+  WRITE: /.
+
+  "4) Check auf Includes
+  WRITE: / 'Die Tabelle', wa_aktuell, 'hat folgende Tabellen inkludiert:'.
+  LOOP AT it_dd03l INTO wa_dd03l.
+    IF wa_dd03l-precfield <> ''.
+      APPEND wa_dd03l-precfield TO it_precfield. "An Tabelle anfügen
+      counterPrecfield = counterPrecfield + 1. "Zähler zeigt an, dass eine Tabelle gefunden wurde (nur für die optische Ausgabe)
+    ENDIF.
+  ENDLOOP.
+  LOOP AT it_precfield INTO wa_precfield.
+    WRITE: /5 wa_precfield.
+" +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+" ++++++++++++++++++++++++++++++++++ Hier sollte genau wie zuvor bei den CHECKTABLES vorgegangen werden +++++++++++++++++++
+" +++++ ist aber noch nicht programmiert, die inkludierten Tabellen werden noch nicht an die Tabelle it_found angefügt ++++
+*    APPEND wa_precfield TO it_found. "Tabellennamen zu Sammeltabelle zufügen
+" +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+  ENDLOOP.
+  IF counterPrecfield = 0.
+    WRITE: /5 '(keine)'.
+  ENDIF.
+  WRITE: /.
+
+ENDFORM.                    "spalteninfosAuslesen
+
+
+*&---------------------------------------------------------------------*
+*&      Form  gefundeneTabelleAuslesen
+*&---------------------------------------------------------------------*
+*       Dynamisch, jeweils die gefundene Tabelle
+*----------------------------------------------------------------------*
+FORM gefundeneTabelleAuslesen.
+
+  "Counter zurücksetzen
+  counterInhalte = 0.
+
+  TRY. "Nur ausführen wenn eine "gültige" Tabelle angegeben wurde
+
+      CREATE DATA ref_struct TYPE (wa_aktuell).
+      ASSIGN ref_struct->* TO <fs_struct>.
+
+      WRITE: / '----- GEFUNDEN IN TABELLE', wa_aktuell, /.
+      WRITE: / 'Möglicherweise interessante Inhalte der Tabelle', wa_aktuell, ':'.
+
+      SELECT SINGLE * FROM (wa_aktuell) INTO <fs_struct>. "Erste Zeile der Tabelle auslesen (reicht aus, da alle Zeilen die gleiche Datenstruktur haben
+
+      DO. "Schleife, die alle Felder des Datensatzes durchläuft
+        ASSIGN COMPONENT sy-index OF STRUCTURE <fs_struct> TO <fs_component>.
+        IF sy-subrc <> 0.
+          NEW-LINE.
+          EXIT.
+        ENDIF.
+*        WRITE /5 <fs_component>.                    "/// nur zum Test ///
+
+        DESCRIBE FIELD <fs_component> TYPE describeTyp. "Datentyp ermitteln und in Variable speichern
+
+        "---------------- Check auf Datentyp T (Time) ------------------------------------------------------
+        IF describeTyp = 'T' AND <fs_component> <> 0. "Wenn Feld vom Datentyp T (TIME) und Wert nicht 00:00:00
+          WRITE: /5 'Feld vom Datentyp T (Time)', '/ Inhalt:', <fs_component>.
+          counterInhalte = counterInhalte + 1.
+        ENDIF.
+        "---------------- Check auf brauchbares Muster (REGEX) ---------------------------------------------
+        "Nur Feldinhalte mit den Datentypen Char, Number und String durchsuchen
+        IF describeTyp = 'C' OR describeTyp = 'N' OR describeTyp = 'string'.
+*          WRITE: '// Datentyp:', describeTyp.                     "/// nur zum Test ///
+          FIND ALL OCCURRENCES OF REGEX '[0-2]+[0-9]+[00-59]+[00-59]' IN <fs_component> IGNORING CASE RESULTS it_regex. " !!! Muster muss eventuell überarbeitet werden
+          IF sy-subrc = 0 AND <fs_component> CN '0' AND <fs_component> CN '[0-1]' AND strlen( <fs_component> ) >= 6. "Wenn ein Feld dem REGEX entspricht, mind. 6 Zeichen lang ist und nicht nur 0 und 1 enthält
+            WRITE: /5 'Feld vom Datentyp', describeTyp, '/ Inhalt:', <fs_component>.
+            WRITE: /10 'Interessante Fundstellen:'.
+            LOOP AT it_regex INTO wa_regex.
+              WRITE: /10 '- ', <fs_component>+wa_regex-offset(wa_regex-length). "Ausgabe ab Fundstelle (offset) mit Länge (length)
+            ENDLOOP.
+            counterInhalte = counterInhalte + 1.
+          ENDIF.
+        ENDIF.
+      ENDDO.
+
+      IF counterInhalte = 0.
+        WRITE: /5 '(keine)'.
+      ENDIF.
+
+    CATCH cx_root.
+      MESSAGE 'Tabelle irgendwie ungültig... (ohne try/catch fliegen wir hier raus).' TYPE 'I'.
+
+  ENDTRY.
+ENDFORM.                    "gefundeneTabelleAuslesen
